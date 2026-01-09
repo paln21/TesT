@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P2P Custom Chat</title>
+    <title>P2P Custom Chat (Fixed)</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
     <style>
-        /* --- Discord風 CSS (Updated) --- */
+        /* --- Discord風 CSS --- */
         :root {
             --bg-tertiary: #202225;
             --bg-secondary: #2f3136;
@@ -59,7 +59,6 @@
         /* ユーザーコントロール */
         .user-controls { background-color: #292b2f; padding: 8px; display: flex; align-items: center; }
         .avatar { width: 32px; height: 32px; background-color: var(--brand); border-radius: 50%; position: relative; margin-right: 8px; display: flex; align-items: center; justify-content: center; font-size: 12px; color: white; font-weight: bold; }
-        .status-dot { width: 10px; height: 10px; background-color: var(--success); border-radius: 50%; position: absolute; bottom: -2px; right: -2px; border: 2px solid #292b2f; }
         .user-info { flex: 1; overflow: hidden; }
         .username { font-size: 14px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .user-id-display { font-size: 12px; color: var(--text-muted); }
@@ -104,7 +103,7 @@
         /* ビデオ/画面共有 */
         .video-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px; background: #000; display: none; border-bottom: 1px solid var(--bg-tertiary); }
         .video-grid.active { display: flex; min-height: 150px; }
-        video { max-width: 250px; border-radius: 4px; background: #202225; }
+        video { max-width: 300px; border-radius: 4px; background: #202225; }
 
         /* スクロールバー */
         ::-webkit-scrollbar { width: 8px; height: 8px; background-color: #2e3338; }
@@ -169,8 +168,7 @@
 
             <div class="video-grid" id="video-grid"></div>
 
-            <div class="messages-container" id="messages-container">
-                </div>
+            <div class="messages-container" id="messages-container"></div>
 
             <div class="input-area">
                 <div class="input-wrapper">
@@ -185,13 +183,13 @@
         let peer = null;
         let myPeerId = "";
         let myDisplayName = "";
-        let connections = []; // DataConnections
-        let mediaCalls = [];  // MediaConnections
+        let connections = []; 
+        let mediaCalls = []; 
+        let screenCalls = []; // 画面共有用のCallを別途管理
         
-        let channels = ['general']; // チャンネルリスト
+        let channels = ['general']; 
         let currentChannel = 'general';
         
-        // Media State
         let localStream = null;
         let screenStream = null;
         let isMicOn = true;
@@ -202,21 +200,12 @@
             const nameInput = document.getElementById('login-display-name').value.trim();
             const idInput = document.getElementById('login-id').value.trim();
 
-            if (!nameInput || !idInput) {
-                alert("表示名とIDを入力してください");
-                return;
-            }
-
-            // IDのバリデーション (簡易)
-            if (!/^[a-zA-Z0-9_-]+$/.test(idInput)) {
-                alert("IDは半角英数字、ハイフン、アンダースコアのみ使用できます");
-                return;
-            }
+            if (!nameInput || !idInput) { alert("表示名とIDを入力してください"); return; }
+            if (!/^[a-zA-Z0-9_-]+$/.test(idInput)) { alert("IDは半角英数字、ハイフン、アンダースコアのみ使用できます"); return; }
 
             myDisplayName = nameInput;
             document.querySelector('.login-btn').innerText = "接続中...";
 
-            // PeerJS接続
             peer = new Peer(idInput, { debug: 1 });
 
             peer.on('open', (id) => {
@@ -226,30 +215,21 @@
 
             peer.on('error', (err) => {
                 console.error(err);
-                if (err.type === 'unavailable-id') {
-                    alert("そのIDは既に使用されています。別のIDを指定してください。");
-                    document.querySelector('.login-btn').innerText = "開始する";
-                } else {
-                    alert("接続エラー: " + err.type);
-                    document.querySelector('.login-btn').innerText = "開始する";
-                }
+                alert("エラー: " + err.type);
+                document.querySelector('.login-btn').innerText = "開始する";
             });
         }
 
         function startApp() {
-            // UI切り替え
             document.getElementById('login-overlay').style.display = 'none';
-            document.getElementById('app-container').style.display = 'flex'; // blockではなくflex
+            document.getElementById('app-container').style.display = 'flex';
 
-            // ユーザー情報表示
             document.getElementById('display-name-label').textContent = myDisplayName;
             document.getElementById('my-id-label').textContent = myPeerId;
             document.getElementById('my-avatar').textContent = myDisplayName.charAt(0).toUpperCase();
 
-            // 初期チャンネルセットアップ
             setupChannel('general');
 
-            // マイク準備
             navigator.mediaDevices.getUserMedia({ audio: true, video: false })
                 .then(stream => {
                     localStream = stream;
@@ -261,14 +241,12 @@
                     updateMicIcon();
                 });
 
-            // イベントリスナ設定
             setupPeerEvents();
         }
 
         function setupPeerEvents() {
             peer.on('connection', (conn) => {
                 handleConnection(conn);
-                // 接続相手に自分の表示名と既存チャンネル情報を送る（簡易同期）
                 conn.on('open', () => {
                     conn.send({ type: 'info', name: myDisplayName });
                     channels.forEach(ch => {
@@ -277,35 +255,38 @@
                 });
             });
 
+            // ★修正ポイント: 着信時の振り分け処理
             peer.on('call', (call) => {
-                call.answer(localStream);
-                handleCall(call);
+                // メタデータを確認して、画面共有か通常通話か判断
+                if (call.metadata && call.metadata.type === 'screenshare') {
+                    // 画面共有の着信 -> マイク音声は送り返さず、受信のみ行う
+                    call.answer(); 
+                    handleScreenCall(call);
+                } else {
+                    // 通常通話の着信 -> マイク音声を送り返す
+                    call.answer(localStream);
+                    handleCall(call);
+                }
             });
         }
 
         function connectToPeer() {
             const targetId = document.getElementById('target-id').value.trim();
             if (!targetId || targetId === myPeerId) return;
-
-            // 既存チェック
-            if (connections.find(c => c.peer === targetId)) {
-                alert("既に接続済みです");
-                return;
-            }
+            if (connections.find(c => c.peer === targetId)) { alert("既に接続済みです"); return; }
 
             const conn = peer.connect(targetId);
             handleConnection(conn);
 
             conn.on('open', () => {
-                // 名前送信
                 conn.send({ type: 'info', name: myDisplayName });
-                // チャンネル情報送信
                 channels.forEach(ch => {
                     if(ch !== 'general') conn.send({ type: 'new_channel', channel: ch });
                 });
-                // 通話発信
+                
+                // 通常通話の発信
                 if (localStream) {
-                    const call = peer.call(targetId, localStream);
+                    const call = peer.call(targetId, localStream, { metadata: { type: 'voice' } });
                     handleCall(call);
                 }
             });
@@ -314,36 +295,22 @@
         // --- データ通信ハンドリング ---
         function handleConnection(conn) {
             connections.push(conn);
-            
             conn.on('data', (data) => {
                 switch(data.type) {
-                    case 'chat':
-                        addMessageToUI(data.channel, data.name, data.msg, false);
-                        // もし未読チャンネルなら通知バッジなどの処理もここで可能
-                        break;
-                    case 'info':
-                        addSystemMessage('general', `${data.name} (${conn.peer}) が参加しました`);
-                        break;
-                    case 'new_channel':
-                        addChannel(data.channel, false); // false = 自分発信ではない
-                        break;
+                    case 'chat': addMessageToUI(data.channel, data.name, data.msg, false); break;
+                    case 'info': addSystemMessage('general', `${data.name} が参加しました`); break;
+                    case 'new_channel': addChannel(data.channel, false); break;
                 }
             });
-
             conn.on('close', () => {
                 connections = connections.filter(c => c !== conn);
                 addSystemMessage('general', `ユーザー ${conn.peer} が切断しました`);
-            });
-
-            conn.on('error', (err) => {
-                console.error("Conn Error", err);
+                removeVideo(conn.peer); // 切断時にビデオも消す
             });
         }
 
         // --- チャンネル管理 ---
-        
         function setupChannel(channelName) {
-            // UI生成
             const list = document.getElementById('channel-list');
             const div = document.createElement('div');
             div.className = `channel ${channelName === currentChannel ? 'active' : ''}`;
@@ -352,13 +319,10 @@
             div.onclick = () => switchChannel(channelName);
             list.appendChild(div);
 
-            // メッセージコンテナ生成
             const container = document.getElementById('messages-container');
             const msgList = document.createElement('div');
             msgList.className = `messages-list ${channelName === currentChannel ? 'active' : ''}`;
             msgList.id = `msgs-${channelName}`;
-            
-            // Welcomeメッセージ
             msgList.innerHTML = `<div class="system-msg">#${channelName} の始まりです</div>`;
             container.appendChild(msgList);
         }
@@ -367,9 +331,7 @@
             const name = prompt("新しいスレ（チャンネル）の名前を入力してください:");
             if (!name) return;
             const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase();
-            if (!safeName) { alert("英数字で入力してください"); return; }
-            if (channels.includes(safeName)) { alert("既に存在します"); return; }
-
+            if (!safeName) return;
             addChannel(safeName, true);
         }
 
@@ -377,11 +339,8 @@
             if (channels.includes(name)) return;
             channels.push(name);
             setupChannel(name);
-
             if (broadcast) {
-                // 全員に通知
                 broadcastData({ type: 'new_channel', channel: name });
-                // 自分で作成した場合は即座に切り替え
                 switchChannel(name);
             } else {
                 addSystemMessage('general', `新しいチャンネル #${name} が作成されました`);
@@ -389,20 +348,13 @@
         }
 
         function switchChannel(name) {
-            // 前のチャンネルを非アクティブ化
             document.getElementById(`ch-btn-${currentChannel}`).classList.remove('active');
             document.getElementById(`msgs-${currentChannel}`).classList.remove('active');
-
             currentChannel = name;
-
-            // 新しいチャンネルをアクティブ化
             document.getElementById(`ch-btn-${currentChannel}`).classList.add('active');
             document.getElementById(`msgs-${currentChannel}`).classList.add('active');
-            
-            // ヘッダー更新
             document.getElementById('current-channel-title').textContent = name;
             document.getElementById('msg-input').placeholder = `#${name} へメッセージを送信`;
-            document.getElementById('msg-input').focus();
         }
 
         // --- チャット機能 ---
@@ -411,40 +363,22 @@
                 const input = document.getElementById('msg-input');
                 const msg = input.value;
                 if (!msg.trim()) return;
-
-                // 自分のUIに追加
                 addMessageToUI(currentChannel, myDisplayName, msg, true);
-                
-                // 送信
-                broadcastData({
-                    type: 'chat',
-                    channel: currentChannel,
-                    name: myDisplayName,
-                    msg: msg
-                });
-
+                broadcastData({ type: 'chat', channel: currentChannel, name: myDisplayName, msg: msg });
                 input.value = '';
             }
         }
 
         function broadcastData(data) {
-            connections.forEach(conn => {
-                if (conn.open) conn.send(data);
-            });
+            connections.forEach(conn => { if (conn.open) conn.send(data); });
         }
 
         function addMessageToUI(channel, name, text, isMe) {
-            // チャンネルが存在しない場合は作成（受信側用）
-            if (!channels.includes(channel)) {
-                addChannel(channel, false);
-            }
-
+            if (!channels.includes(channel)) addChannel(channel, false);
             const container = document.getElementById(`msgs-${channel}`);
             if (!container) return;
-
             const date = new Date();
             const timeStr = `${date.getHours()}:${date.getMinutes().toString().padStart(2, '0')}`;
-            
             const msgDiv = document.createElement('div');
             msgDiv.className = 'message';
             msgDiv.innerHTML = `
@@ -452,35 +386,49 @@
                 <div class="message-content">
                     <div class="msg-header">
                         <span class="msg-author">${escapeHtml(name)}</span>
-                        <span class="msg-timestamp">Today at ${timeStr}</span>
+                        <span class="msg-timestamp">${timeStr}</span>
                     </div>
                     <div class="msg-text">${escapeHtml(text)}</div>
                 </div>
             `;
-            
             container.appendChild(msgDiv);
             container.scrollTop = container.scrollHeight;
         }
 
         function addSystemMessage(channel, text) {
             const container = document.getElementById(`msgs-${channel}`);
-            if (!container) return;
-            const div = document.createElement('div');
-            div.className = 'system-msg';
-            div.textContent = text;
-            container.appendChild(div);
-            container.scrollTop = container.scrollHeight;
+            if (container) {
+                const div = document.createElement('div');
+                div.className = 'system-msg';
+                div.textContent = text;
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+            }
         }
 
         // --- メディア(通話/画面共有) ---
+        
+        // 通常通話のハンドリング
         function handleCall(call) {
             mediaCalls.push(call);
             call.on('stream', (remoteStream) => {
-                addVideo(remoteStream, call.peer);
+                // 音声のみでもvideoタグで作る（不可視）または可視化する
+                // ここでは簡易的に音声通話は表示せず、音だけ再生させる
+                const audio = document.createElement('audio');
+                audio.srcObject = remoteStream;
+                audio.autoplay = true;
+                // 将来的にはユーザーアイコンの周りを光らせる等のUI連携が可能
+            });
+        }
+
+        // 画面共有のハンドリング (受信側)
+        function handleScreenCall(call) {
+            screenCalls.push(call);
+            call.on('stream', (remoteStream) => {
+                addVideo(remoteStream, call.peer + '-screen');
             });
             call.on('close', () => {
-                removeVideo(call.peer);
-                mediaCalls = mediaCalls.filter(c => c !== call);
+                removeVideo(call.peer + '-screen');
             });
         }
 
@@ -498,36 +446,44 @@
             else btn.classList.add('active-red');
         }
 
+        // ★修正ポイント: 画面共有ロジック
         async function toggleScreen() {
             if (isScreenSharing) {
-                // Stop Sharing
                 if (screenStream) {
                     screenStream.getTracks().forEach(track => track.stop());
                 }
                 isScreenSharing = false;
                 document.getElementById('btn-screen').classList.remove('active-green');
-                document.getElementById('video-grid').classList.remove('active');
                 removeVideo('me-screen');
+                
+                // 共有停止時は、ここで能動的にCallを閉じるのが理想だが
+                // PeerJSの仕様上、ストリーム停止を検知して相手側で処理させる
+                screenCalls.forEach(call => call.close());
+                screenCalls = [];
             } else {
-                // Start Sharing
                 try {
                     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
                     isScreenSharing = true;
                     document.getElementById('btn-screen').classList.add('active-green');
-                    document.getElementById('video-grid').classList.add('active');
 
-                    // 自分用プレビュー
                     addVideo(screenStream, 'me-screen');
 
-                    // 全員に発信
+                    // 全員に「これは画面共有だよ(type: screenshare)」と伝えて発信
                     connections.forEach(conn => {
-                        const call = peer.call(conn.peer, screenStream);
+                        const call = peer.call(conn.peer, screenStream, {
+                            metadata: { type: 'screenshare' }
+                        });
+                        screenCalls.push(call);
                     });
 
-                    screenStream.getVideoTracks()[0].onended = () => toggleScreen();
+                    // ブラウザの「共有を停止」ボタンを押した時の処理
+                    screenStream.getVideoTracks()[0].onended = () => {
+                        if (isScreenSharing) toggleScreen();
+                    };
 
                 } catch (err) {
                     console.error("Screen share error", err);
+                    isScreenSharing = false;
                 }
             }
         }
@@ -535,6 +491,8 @@
         function addVideo(stream, id) {
             const grid = document.getElementById('video-grid');
             grid.classList.add('active');
+            
+            // 重複防止
             if (document.getElementById(`vid-${id}`)) return;
 
             const v = document.createElement('video');
@@ -542,21 +500,22 @@
             v.id = `vid-${id}`;
             v.autoplay = true;
             v.playsInline = true;
-            if (id === 'me-screen') v.muted = true;
+            if (id === 'me-screen') v.muted = true; // 自分のはミュート
             grid.appendChild(v);
         }
 
         function removeVideo(id) {
             const v = document.getElementById(`vid-${id}`);
             if (v) v.remove();
-            if (document.getElementById('video-grid').children.length === 0) {
-                document.getElementById('video-grid').classList.remove('active');
+            
+            const grid = document.getElementById('video-grid');
+            if (grid.children.length === 0) {
+                grid.classList.remove('active');
             }
         }
 
-        // --- Utils ---
         function copyId() {
-            navigator.clipboard.writeText(myPeerId).then(() => alert("IDをコピーしました: " + myPeerId));
+            navigator.clipboard.writeText(myPeerId).then(() => alert("IDをコピーしました"));
         }
 
         function escapeHtml(text) {
